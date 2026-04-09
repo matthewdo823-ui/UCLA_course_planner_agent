@@ -82,7 +82,7 @@ This starts all 8 agents as separate processes. Press `Ctrl+C` to stop all. Cras
 ### Individual agents
 
 ```bash
-cd ~/Agents\ 2
+cd ~/yourFolderName\ 2
 python -m course_planner.agents.input_agent
 python -m course_planner.agents.available_classes_agent
 python -m course_planner.agents.enrollment_agent
