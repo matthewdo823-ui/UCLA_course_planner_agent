@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 ASI1_API_KEY = os.environ.get("ASI1_API_KEY", "")
-asi_client = OpenAI(base_url="https://api.asi1.ai/v1", api_key="sk_f0ac409c927e4993920e03d9ec9575e61ff6a53e201e4f1eb8fd6c69f78d7e5a")
+asi_client = OpenAI(base_url="https://api.asi1.ai/v1", api_key="sk_bb30115320d346e2a2100842c85ab4890bed8dc2042742058c8083d8c89023eb")
 
 PREREQ_SYSTEM = (
     "Given this UCLA course description, extract the list of prerequisite "

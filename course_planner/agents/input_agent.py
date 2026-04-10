@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
@@ -37,27 +37,28 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 ASI1_API_KEY = os.environ.get("ASI1_API_KEY", "")
-asi_client = OpenAI(base_url="https://api.asi1.ai/v1", api_key="sk_f0ac409c927e4993920e03d9ec9575e61ff6a53e201e4f1eb8fd6c69f78d7e5a")
+asi_client = AsyncOpenAI(
+    base_url="https://api.asi1.ai/v1",
+    api_key="sk_bb30115320d346e2a2100842c85ab4890bed8dc2042742058c8083d8c89023eb",
+)
 
 # ---------------------------------------------------------------------------
 # Conversation state
 # ---------------------------------------------------------------------------
 
-# Fields collected in order during the conversation.
 FIELD_ORDER: list[str] = [
-    "name_major",        # 1. student name + major
-    "year_gpa",          # 2. year level + GPA
-    "units_completed",   # 3. total units completed
-    "enrollment_pass",   # 4. pass type + open datetime
-    "dars_text",         # 5. DARS report paste
-    "required_courses",  # 6. must-take courses
-    "preferred_courses", # 7. nice-to-have courses
-    "constraints",       # 8. scheduling constraints
-    "format_pref",       # 9. in-person / hybrid / online
-    "unit_range",        # 10. desired min and max units
+    "name_major",
+    "year_gpa",
+    "units_completed",
+    "enrollment_pass",
+    "dars_text",
+    "required_courses",
+    "preferred_courses",
+    "constraints",
+    "format_pref",
+    "unit_range",
 ]
 
-# In-memory session store keyed by sender address.
 sessions: dict[str, dict] = {}
 
 # ---------------------------------------------------------------------------
@@ -79,7 +80,6 @@ Return ONLY a JSON array of strings in the format ['CS 111', 'MATH 33A', ...].
 Include every course listed as completed or in-progress.\
 """
 
-# Per-field prompts that tell the LLM what to ask for next.
 FIELD_PROMPTS: dict[str, str] = {
     "name_major": (
         "Ask the student for their full name and their major at UCLA."
@@ -130,11 +130,10 @@ FIELD_PROMPTS: dict[str, str] = {
 
 
 def _new_session() -> dict:
-    """Return a blank session dict."""
     return {
         "step": 0,
-        "history": [],  # list of {"role": ..., "content": ...}
-        "collected": {},  # field_name -> raw answer text
+        "history": [],
+        "collected": {},
     }
 
 
@@ -152,7 +151,7 @@ async def _llm_chat(history: list[dict], system_extra: str = "") -> str:
         system += "\n\n" + system_extra
     messages = [{"role": "system", "content": system}] + history
     try:
-        resp = asi_client.chat.completions.create(
+        resp = await asi_client.chat.completions.create(
             model="asi1-mini",
             messages=messages,
             max_tokens=512,
@@ -166,7 +165,7 @@ async def _llm_chat(history: list[dict], system_extra: str = "") -> str:
 async def _parse_dars(dars_text: str) -> list[str]:
     """Use ASI:One to extract course codes from pasted DARS text."""
     try:
-        resp = asi_client.chat.completions.create(
+        resp = await asi_client.chat.completions.create(
             model="asi1-mini",
             messages=[
                 {"role": "system", "content": DARS_EXTRACT_SYSTEM},
@@ -194,8 +193,6 @@ def _enrollment_pass_from_str(s: str) -> EnrollmentPass:
 
 
 def _build_profile(collected: dict, dars_courses: list[str], reply_to: str = "") -> StudentProfile:
-    """Construct a StudentProfile from the collected conversation data."""
-    # Parse year
     year_raw = collected.get("year_gpa", "junior").lower()
     year = YearLevel.JUNIOR
     for y in YearLevel:
@@ -203,29 +200,24 @@ def _build_profile(collected: dict, dars_courses: list[str], reply_to: str = "")
             year = y
             break
 
-    # Parse GPA
     gpa = 0.0
     gpa_match = re.search(r"(\d+\.\d+)", collected.get("year_gpa", ""))
     if gpa_match:
         gpa = float(gpa_match.group(1))
 
-    # Parse units completed
     units = 0.0
     units_match = re.search(r"(\d+\.?\d*)", collected.get("units_completed", "0"))
     if units_match:
         units = float(units_match.group(1))
 
-    # Parse enrollment pass
     pass_raw = collected.get("enrollment_pass", "")
     enrollment_pass = _enrollment_pass_from_str(pass_raw)
 
-    # Parse unit range
     unit_range_raw = collected.get("unit_range", "12-16")
     unit_nums = re.findall(r"(\d+)", unit_range_raw)
     min_units = int(unit_nums[0]) if len(unit_nums) >= 1 else 12
     max_units = int(unit_nums[1]) if len(unit_nums) >= 2 else min_units
 
-    # Parse required/preferred courses
     required = [
         c.strip()
         for c in re.split(r"[,;\n]", collected.get("required_courses", ""))
@@ -236,8 +228,6 @@ def _build_profile(collected: dict, dars_courses: list[str], reply_to: str = "")
         for c in re.split(r"[,;\n]", collected.get("preferred_courses", ""))
         if c.strip() and c.strip().lower() not in ("none", "n/a", "no")
     ]
-
-    # Parse constraints
     constraints = [
         c.strip()
         for c in re.split(r"[,;\n]", collected.get("constraints", ""))
@@ -280,7 +270,6 @@ protocol = Protocol(spec=chat_protocol_spec)
 
 
 async def _send_text(ctx: Context, destination: str, text: str) -> None:
-    """Send a ChatMessage containing a single TextContent."""
     await ctx.send(
         destination,
         ChatMessage(
@@ -293,7 +282,7 @@ async def _send_text(ctx: Context, destination: str, text: str) -> None:
 
 @protocol.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
-    # --- ACK ---
+    # ACK
     await ctx.send(
         sender,
         ChatAcknowledgement(
@@ -302,7 +291,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         ),
     )
 
-    # --- Extract user text ---
+    # Extract user text
     user_text = ""
     for item in msg.content:
         if isinstance(item, TextContent):
@@ -311,16 +300,14 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     if not user_text:
         return
 
-    # --- Session lookup / create ---
+    # Session lookup / create
     if sender not in sessions:
         sessions[sender] = _new_session()
     session = sessions[sender]
 
     current_field = _current_field(session)
 
-    # ------------------------------------------------------------------
     # First message: generate the opening question
-    # ------------------------------------------------------------------
     if session["step"] == 0 and not session["history"]:
         prompt_instruction = FIELD_PROMPTS[FIELD_ORDER[0]]
         session["history"].append({"role": "user", "content": user_text})
@@ -332,28 +319,22 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         await _send_text(ctx, sender, opening)
         return
 
-    # ------------------------------------------------------------------
-    # Continuing conversation: store the user's answer for current field
-    # ------------------------------------------------------------------
+    # Store the user's answer for current field
     session["history"].append({"role": "user", "content": user_text})
 
     if current_field is not None:
         session["collected"][current_field] = user_text
 
-        # Special handling: DARS parsing
         if current_field == "dars_text":
             dars_courses = await _parse_dars(user_text)
             session["collected"]["_dars_courses"] = dars_courses
             ctx.logger.info(f"DARS parsed — {len(dars_courses)} courses extracted")
 
-        # Advance to next field
         session["step"] += 1
 
     next_field = _current_field(session)
 
-    # ------------------------------------------------------------------
     # All fields collected → build profile and forward
-    # ------------------------------------------------------------------
     if next_field is None:
         dars_courses = session["collected"].get("_dars_courses", [])
         profile = _build_profile(session["collected"], dars_courses, reply_to=sender)
@@ -361,14 +342,12 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
 
         ctx.logger.info("StudentProfile complete — forwarding to available_classes_agent")
 
-        # Forward to available_classes_agent
         await _send_text(
             ctx,
             AGENT_ADDRESSES["available_classes"],
             profile_json,
         )
 
-        # Confirm to the user — session stays open (no EndSessionContent)
         confirmation = (
             "Thanks! I've got everything I need. Your profile is being processed — "
             "I'll get back to you with course recommendations shortly."
@@ -376,9 +355,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         await _send_text(ctx, sender, confirmation)
         return
 
-    # ------------------------------------------------------------------
     # Ask for the next field
-    # ------------------------------------------------------------------
     prompt_instruction = FIELD_PROMPTS[next_field]
     reply = await _llm_chat(
         session["history"],

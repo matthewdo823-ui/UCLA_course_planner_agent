@@ -3,7 +3,7 @@
 
 Usage:
     cd ~/Agents\ 2
-    python run_all.py
+    python3 run_all.py
 
 Each agent binds to its own port (8001–8008).  Press Ctrl+C to stop all.
 """

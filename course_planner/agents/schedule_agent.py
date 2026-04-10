@@ -527,9 +527,9 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
 
     # --- Extract two TextContent blocks ---
     text_blocks: list[str] = []
-    for item in msg.content:
-        if isinstance(item, TextContent):
-            text_blocks.append(item.text)
+    for item in msg.content:xs
+    if isinstance(item, TextContent):
+        text_blocks.append(item.text)
 
     if len(text_blocks) < 2:
         ctx.logger.error(
