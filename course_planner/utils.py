@@ -237,6 +237,8 @@ class _EnumEncoder(json.JSONEncoder):
 def serialize(obj) -> str:
     """Convert any dataclass (including nested dataclasses,
     Enums, and Optional fields) to a JSON string."""
+    if isinstance(obj, list):
+        return json.dumps([dataclasses.asdict(item) for item in obj], cls=_EnumEncoder)
     return json.dumps(dataclasses.asdict(obj), cls=_EnumEncoder)
 
 
