@@ -162,7 +162,7 @@ async def _llm_chat(history: list[dict], system_extra: str = "") -> str:
 
     try:
         resp = await claude_client.messages.create(
-            model="claude-3-haiku",  # or latest
+            model="claude-3-5-haiku-latest",  # or latest
             max_tokens=512,
             system=system,
             messages=history,

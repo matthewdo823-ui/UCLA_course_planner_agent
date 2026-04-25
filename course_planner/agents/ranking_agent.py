@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import re
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -34,10 +36,14 @@ logger = logging.getLogger(__name__)
 # ASI:One client
 # ---------------------------------------------------------------------------
 
-ASI1_API_KEY = os.environ.get("ASI1_API_KEY", "")
-asi_client = OpenAI(base_url="https://api.asi1.ai/v1", api_key="sk_bb30115320d346e2a2100842c85ab4890bed8dc2042742058c8083d8c89023eb")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+asi_client = OpenAI(
+    api_key=GEMINI_API_KEY,
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
 
 REASON_SYSTEM = (
+    "<|think|> You are a UCLA enrollment advisor. "
     "You are a UCLA enrollment advisor. Given a schedule candidate's scores, "
     "write 2-3 sentences in plain English explaining why this schedule ranked "
     "where it did. Cite the actual numeric scores. Be concise and helpful."
@@ -281,7 +287,7 @@ def _generate_reason(cand: ScheduleCandidate, rank: int) -> str:
     )
     try:
         resp = asi_client.chat.completions.create(
-            model="asi1-mini",
+            model="gemma-4-31b-it",
             messages=[
                 {"role": "system", "content": REASON_SYSTEM},
                 {"role": "user", "content": prompt},

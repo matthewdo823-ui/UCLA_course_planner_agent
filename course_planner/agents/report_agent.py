@@ -7,10 +7,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dotenv import load_dotenv
+load_dotenv()
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from openai import OpenAI
+from openai import AsyncOpenAI  # Updated
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
@@ -36,19 +38,21 @@ logger = logging.getLogger(__name__)
 # ASI:One client
 # ---------------------------------------------------------------------------
 
-ASI1_API_KEY = os.environ.get("ASI1_API_KEY", "")
-asi_client = OpenAI(base_url="https://api.asi1.ai/v1", api_key="sk_bb30115320d346e2a2100842c85ab4890bed8dc2042742058c8083d8c89023eb")
-
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+asi_client = AsyncOpenAI(
+    api_key=GEMINI_API_KEY,
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
 
 # ---------------------------------------------------------------------------
 # Risk-flag generation
 # ---------------------------------------------------------------------------
 
-def _llm_explain(prompt: str) -> str:
-    """One-sentence explanation via ASI:One."""
+async def _llm_explain(prompt: str) -> str:
+    """One-sentence explanation via Gemma 4."""
     try:
-        resp = asi_client.chat.completions.create(
-            model="asi1-mini",
+        resp = await asi_client.chat.completions.create(
+            model="gemma-4-31b-it", # Using the larger reasoning model
             messages=[
                 {"role": "system", "content": (
                     "You are a UCLA enrollment advisor. Write exactly ONE concise "
@@ -65,8 +69,8 @@ def _llm_explain(prompt: str) -> str:
     return ""
 
 
-def _build_risk_flags(candidates: list[ScheduleCandidate]) -> list[CourseRiskFlag]:
-    """Scan all courses in all candidates and build risk flags."""
+async def _build_risk_flags(candidates: list[ScheduleCandidate]) -> list[CourseRiskFlag]:
+    """Scan all courses in all candidates and build risk flags using async LLM calls."""
     flags: list[CourseRiskFlag] = []
     seen: set[tuple[str, str]] = set()  # (course_code, flag_type) de-dup
 
@@ -74,21 +78,20 @@ def _build_risk_flags(candidates: list[ScheduleCandidate]) -> list[CourseRiskFla
         for c_dict in cand.courses:
             code = c_dict.get("course_code", "")
 
-            # The ScheduleCandidate.courses are dicts — enrichment data was
-            # on the CourseOption objects before they became schedule dicts.
-            # We stored key metrics on the ScheduleCandidate aggregate fields,
-            # but per-course detail may be in extended dict keys if present.
-            # We'll check the candidate-level aggregates and per-course dicts.
-
-            # --- Enrollment risk (from per-course dict if available) ---
+            # --- Enrollment risk ---
             chance = c_dict.get("enrollment_chance")
             if chance is None:
-                # Fall back to candidate avg
                 chance = cand.avg_enrollment_chance
 
             if chance is not None and ("enrollment", code) not in seen:
                 if chance < 0.50:
                     sev = "critical" if chance < 0.30 else "warning"
+                    # Await the explanation before creating the flag
+                    explanation = await _llm_explain(
+                        f"Course {code} has a {chance:.0%} chance of being "
+                        f"open at the student's enrollment pass. "
+                        f"Threshold for flagging is 50%."
+                    )
                     flags.append(CourseRiskFlag(
                         course_code=code,
                         flag_type="enrollment",
@@ -96,49 +99,37 @@ def _build_risk_flags(candidates: list[ScheduleCandidate]) -> list[CourseRiskFla
                         metric_name="chance_open_at_pass",
                         metric_value=round(chance, 4),
                         threshold_used=0.50,
-                        explanation=_llm_explain(
-                            f"Course {code} has a {chance:.0%} chance of being "
-                            f"open at the student's enrollment pass. "
-                            f"Threshold for flagging is 50%."
-                        ),
+                        explanation=explanation,
                     ))
                     seen.add(("enrollment", code))
 
             # --- Grade risk ---
             pct_df = c_dict.get("pct_d_or_f")
             if pct_df is not None and ("grade", code) not in seen:
-                if pct_df > 0.25:
+                if pct_df > 0.15:
+                    sev = "critical" if pct_df > 0.25 else "warning"
+                    explanation = await _llm_explain(
+                        f"Course {code} has {pct_df:.0%} of students "
+                        f"receiving D or F grades."
+                    )
                     flags.append(CourseRiskFlag(
                         course_code=code,
                         flag_type="grade",
-                        severity="critical",
+                        severity=sev,
                         metric_name="pct_d_or_f",
                         metric_value=round(pct_df, 4),
-                        threshold_used=0.25,
-                        explanation=_llm_explain(
-                            f"Course {code} has {pct_df:.0%} of students "
-                            f"receiving D or F grades, which is critically high."
-                        ),
-                    ))
-                    seen.add(("grade", code))
-                elif pct_df > 0.15:
-                    flags.append(CourseRiskFlag(
-                        course_code=code,
-                        flag_type="grade",
-                        severity="warning",
-                        metric_name="pct_d_or_f",
-                        metric_value=round(pct_df, 4),
-                        threshold_used=0.15,
-                        explanation=_llm_explain(
-                            f"Course {code} has {pct_df:.0%} of students "
-                            f"receiving D or F grades."
-                        ),
+                        threshold_used=0.25 if sev == "critical" else 0.15,
+                        explanation=explanation,
                     ))
                     seen.add(("grade", code))
 
             # --- Workload risk ---
             workload = c_dict.get("workload_hours_per_week")
             if workload is not None and workload > 15 and ("workload", code) not in seen:
+                explanation = await _llm_explain(
+                    f"Course {code} averages {workload:.1f} hours/week "
+                    f"of work, exceeding the 15-hour warning threshold."
+                )
                 flags.append(CourseRiskFlag(
                     course_code=code,
                     flag_type="workload",
@@ -146,16 +137,17 @@ def _build_risk_flags(candidates: list[ScheduleCandidate]) -> list[CourseRiskFla
                     metric_name="workload_hours_per_week",
                     metric_value=round(workload, 1),
                     threshold_used=15.0,
-                    explanation=_llm_explain(
-                        f"Course {code} averages {workload:.1f} hours/week "
-                        f"of work, exceeding the 15-hour warning threshold."
-                    ),
+                    explanation=explanation,
                 ))
                 seen.add(("workload", code))
 
             # --- Rating risk ---
             bw = c_dict.get("bruinwalk_composite_score")
             if bw is not None and bw < 2.5 and ("rating", code) not in seen:
+                explanation = await _llm_explain(
+                    f"Course {code} has a Bruinwalk composite score "
+                    f"of {bw:.2f}/5.0, which is below the 2.5 threshold."
+                )
                 flags.append(CourseRiskFlag(
                     course_code=code,
                     flag_type="rating",
@@ -163,34 +155,23 @@ def _build_risk_flags(candidates: list[ScheduleCandidate]) -> list[CourseRiskFla
                     metric_name="bruinwalk_composite_score",
                     metric_value=round(bw, 4),
                     threshold_used=2.5,
-                    explanation=_llm_explain(
-                        f"Course {code} has a Bruinwalk composite score "
-                        f"of {bw:.2f}/5.0, which is below the 2.5 threshold."
-                    ),
+                    explanation=explanation,
                 ))
                 seen.add(("rating", code))
-
-    # Also check candidate-level metrics for enrollment
-    for cand in candidates:
-        if cand.min_enrollment_chance < 0.50:
-            # Already handled per-course above where possible;
-            # add a general flag if not already covered
-            pass
 
     # Sort: critical first, then by course code
     flags.sort(key=lambda f: (0 if f.severity == "critical" else 1, f.course_code))
     return flags
 
-
 # ---------------------------------------------------------------------------
 # Markdown report generation
 # ---------------------------------------------------------------------------
 
-def _llm_narrative(system: str, prompt: str, max_tokens: int = 300) -> str:
-    """Generate a narrative section via ASI:One."""
+async def _llm_narrative(system: str, prompt: str, max_tokens: int = 300) -> str:
+    """Generate a narrative section via Gemma 4."""
     try:
-        resp = asi_client.chat.completions.create(
-            model="asi1-mini",
+        resp = await asi_client.chat.completions.create(
+            model="gemma-4-31b-it",
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -212,7 +193,7 @@ def _format_time(minutes: int) -> str:
     return f"{h12}:{m:02d} {ampm}"
 
 
-def _build_markdown(
+async def _build_markdown(
     candidates: list[ScheduleCandidate],
     profile: StudentProfile,
     flags: list[CourseRiskFlag],
@@ -244,7 +225,7 @@ def _build_markdown(
             f"Risk flags: {len(flags)} ({sum(1 for f in flags if f.severity == 'critical')} critical)\n"
             f"Preference match: {top.preference_match_score:.2f}"
         )
-    exec_summary = _llm_narrative(
+    exec_summary = await _llm_narrative(
         "You are writing the executive summary of a UCLA course planning report. "
         "Write 2-3 sentences in plain English summarizing the recommendation.",
         summary_data,
@@ -455,12 +436,12 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     )
 
     # --- Build risk flags ---
-    flags = _build_risk_flags(candidates)
+    flags = await _build_risk_flags(candidates)
     ctx.logger.info("Generated %d risk flags", len(flags))
 
     # --- Build Markdown report ---
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    markdown = _build_markdown(candidates, profile, flags, now_str)
+    markdown = await _build_markdown(candidates, profile, flags, now_str)
 
     # --- Build PlannerReport ---
     top = candidates[0] if candidates else None
