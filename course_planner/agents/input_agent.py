@@ -14,7 +14,12 @@ import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from openai import AsyncOpenAI
+#from openai import AsyncOpenAI
+from dotenv import load_dotenv
+load_dotenv()
+from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
@@ -33,14 +38,20 @@ from course_planner.utils import AGENT_ADDRESSES, serialize
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# ASI:One client
+# Gem4 client
 # ---------------------------------------------------------------------------
 
-ASI1_API_KEY = os.environ.get("ASI1_API_KEY", "")
-asi_client = AsyncOpenAI(
-    base_url="https://api.asi1.ai/v1",
-    api_key="sk_bb30115320d346e2a2100842c85ab4890bed8dc2042742058c8083d8c89023eb",
+#asi_client = genai.Client()
+
+claude_client = AsyncAnthropic(
+    api_key=os.environ.get("ANTHROPIC_API_KEY")
 )
+
+#ASI1_API_KEY = os.environ.get("ASI1_API_KEY", "")
+#asi_client = AsyncOpenAI(
+ #   base_url="https://api.asi1.ai/v1",
+  #  api_key="sk_bb30115320d346e2a2100842c85ab4890bed8dc2042742058c8083d8c89023eb",
+#)
 
 # ---------------------------------------------------------------------------
 # Conversation state
@@ -145,43 +156,46 @@ def _current_field(session: dict) -> str | None:
 
 
 async def _llm_chat(history: list[dict], system_extra: str = "") -> str:
-    """Call ASI:One with the running conversation history."""
     system = INTAKE_SYSTEM
     if system_extra:
         system += "\n\n" + system_extra
-    messages = [{"role": "system", "content": system}] + history
-    try:
-        resp = await asi_client.chat.completions.create(
-            model="asi1-mini",
-            messages=messages,
-            max_tokens=512,
-        )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception as exc:
-        logger.exception("ASI:One call failed")
-        return f"(LLM unavailable — please try again: {exc})"
 
+    try:
+        resp = await claude_client.messages.create(
+            model="claude-3-haiku",  # or latest
+            max_tokens=512,
+            system=system,
+            messages=history,
+        )
+        return "".join(block.text for block in resp.content).strip()
+
+    except Exception as exc:
+        logger.exception("Claude call failed")
+        return f"(LLM unavailable — please try again: {exc})"
+    
 
 async def _parse_dars(dars_text: str) -> list[str]:
-    """Use ASI:One to extract course codes from pasted DARS text."""
     try:
-        resp = await asi_client.chat.completions.create(
-            model="asi1-mini",
+        resp = await claude_client.messages.create(
+            model="claude-3-haiku",
+            max_tokens=1024,
+            system=DARS_EXTRACT_SYSTEM,
             messages=[
-                {"role": "system", "content": DARS_EXTRACT_SYSTEM},
-                {"role": "user", "content": dars_text},
+                {"role": "user", "content": dars_text}
             ],
-            max_tokens=2048,
         )
-        raw = (resp.choices[0].message.content or "").strip()
+
+        raw = "".join(block.text for block in resp.content).strip()
+
         start = raw.find("[")
         end = raw.rfind("]") + 1
         if start >= 0 and end > start:
             return json.loads(raw[start:end])
+
     except Exception:
         logger.exception("DARS parsing failed")
-    return []
 
+    return []
 
 def _enrollment_pass_from_str(s: str) -> EnrollmentPass:
     low = s.lower()
